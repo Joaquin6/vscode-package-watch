@@ -26,5 +26,9 @@
 	"mocha.node_options": [
 		"--require",
 		"src/test/index.ts"
-	]
+	],
+	"mocha.options": {
+		"--opts",
+		"src/test/mocha.opts"
+	}
 }

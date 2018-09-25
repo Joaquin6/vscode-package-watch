@@ -347,7 +347,7 @@ function findFileInParentDirectory(path: string, name: string, stop?: string) {
     }
 }
 
-function getDependenciesFromPackageLock(
+export function getDependenciesFromPackageLock(
     packageJsonPath: string,
     expectedDependencies: Array<[string, string]>,
 ) {
@@ -358,7 +358,7 @@ function getDependenciesFromPackageLock(
     const nameObjectHash = get(readFile(packageLockPath), 'dependencies', {}) as {
         [key: string]: { version: string },
     };
-    const nameVersionHash = mapValues(nameObjectHash, item => item.version);
+    const nameVersionHash = mapValues(nameObjectHash, ({ version }) => version);
 
     return expectedDependencies.map(([name, expectedVersion]) => {
         const modulePath = join(dirname(packageJsonPath), 'node_modules', name, 'package.json');
@@ -379,9 +379,8 @@ export function getDependenciesFromYarnLock(
     expectedDependencies: Array<[string, string]>,
 ) {
     const yarnLockPath = findFileInParentDirectory(dirname(packageJsonPath), 'yarn.lock');
-
     if (!yarnLockPath) { return null; }
-    // Stop processing if the current directory is not part of the Yarn Workspace
+    /** Stop processing if the current directory is not part of the Yarn Workspace */
     if (
         dirname(yarnLockPath) !== dirname(packageJsonPath)
         && !checkYarnWorkspace(packageJsonPath, yarnLockPath)
@@ -390,7 +389,7 @@ export function getDependenciesFromYarnLock(
     const nameObjectHash = get(readFile(yarnLockPath), 'object', {}) as {
         [key: string]: { version: string },
     };
-    const nameVersionHash = mapValues(nameObjectHash, item => item.version);
+    const nameVersionHash = mapValues(nameObjectHash, ({ version }) => version);
 
     return expectedDependencies.map(([name, expectedVersion]) => {
         const modulePath = findFileInParentDirectory(
@@ -411,7 +410,7 @@ export function getDependenciesFromYarnLock(
     });
 }
 
-function checkYarnWorkspace(packageJsonPath: string, yarnLockPath: string) {
+export function checkYarnWorkspace(packageJsonPath: string, yarnLockPath: string) {
     if (!packageJsonPath || !yarnLockPath) { return false; }
 
     // See https://yarnpkg.com/lang/en/docs/workspaces/
@@ -437,7 +436,7 @@ function checkYarnWorkspace(packageJsonPath: string, yarnLockPath: string) {
     return false;
 }
 
-function readFile(filePath: string): object | string {
+export function readFile(filePath: string): object | string {
     let test;
     try {
         test = readFileSync(filePath, 'utf-8');
