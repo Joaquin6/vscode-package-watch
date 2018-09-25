@@ -1,5 +1,30 @@
 {
-    "files.exclude": {
-        "dist": true
-    }
+	"files.exclude": {
+	"dist": false // set this to true to hide the "out" folder with the compiled JS files
+	},
+	"search.exclude": {
+		"dist": true
+	},
+	"editor.tabSize": 4,
+	"editor.insertSpaces": false,
+	"eslint.validate": [
+		"javascript",
+		"javascriptreact",
+		{
+			"language": "html",
+			"autoFix": true
+		}
+	],
+	"tslint.enable": true,
+	"tslint.jsEnable": true,
+	"typescript.tsc.autoDetect": "off",
+	"mocha.files.glob": "src/test/*",
+	"mocha.requires": [
+		"babel-register",
+		"ts-node/register"
+	],
+	"mocha.node_options": [
+		"--require",
+		"src/test/index.ts"
+	]
 }

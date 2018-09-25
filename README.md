@@ -4,7 +4,7 @@
 
 ## Basic usage
 
-![Package Watch](docs/vscode.gif)
+![Package Watch](images/vscode.gif)
 
 As soon as **Package Watch** is installed, the extension offers the following features:
 

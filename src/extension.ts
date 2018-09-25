@@ -1,106 +1,125 @@
-import * as fp from 'path';
-import * as cp from 'child_process';
+import { spawn, spawnSync } from 'child_process';
+import { basename, dirname, extname, join, sep } from 'path';
 
-import * as _ from 'lodash';
-import * as glob from 'glob';
-import * as fs from 'fs-extra';
-import * as semver from 'semver';
-import * as vscode from 'vscode';
-import * as yarn from '@yarnpkg/lockfile';
+import { sync } from 'glob';
+import { parse as yarnParse } from '@yarnpkg/lockfile';
+import { satisfies, valid, validRange } from 'semver';
+import { existsSync, readFileSync, removeSync } from 'fs-extra';
+import { chain, compact, debounce, get, includes, isEqual, findLast, fromPairs, mapValues, some, toPairs, uniq } from 'lodash';
+import { window, workspace, commands, CancellationToken, CancellationTokenSource, ExtensionContext, FileSystemWatcher, OutputChannel, ProgressLocation } from 'vscode';
 
-let fileWatcher: vscode.FileSystemWatcher
-let outputChannel: vscode.OutputChannel
-let pendingOperation: vscode.CancellationTokenSource
+const lastCheckedDependencies = new Map();
 
-const lastCheckedDependencies = new Map<string, object>()
+class CheckingOperation extends CancellationTokenSource {}
+class InstallationOperation extends CancellationTokenSource {}
 
-class CheckingOperation extends vscode.CancellationTokenSource { }
-class InstallationOperation extends vscode.CancellationTokenSource { }
+let outputChannel: OutputChannel;
+let fileWatcher: FileSystemWatcher;
+let pendingOperation: CancellationTokenSource;
 
 type Report = {
-    packageJsonPath: string
+    packageJsonPath: string,
     problems: Array<{
         toString: () => string,
         moduleCheckingNeeded?: boolean,
-        modulePathForCleaningUp?: string
+        modulePathForCleaningUp?: string,
     }>
-}
+};
 
-async function getPackageJsonPathList() {
-    return (await vscode.workspace.findFiles('**/package.json', '**/node_modules/**')).map(link => link.fsPath)
-}
+const getPackageJsonPathList = async () =>
+    (await workspace.findFiles('**/package.json', '**/node_modules/**'))
+    .map(({ fsPath }) => fsPath);
 
-function createReports(packageJsonPathList: Array<string>, skipUnchanged: boolean, token: vscode.CancellationToken): Array<Report> {
-    return packageJsonPathList
-        .filter(packageJsonPath => fp.basename(packageJsonPath) === 'package.json')
-        .map(packageJsonPath => {
-            if (token.isCancellationRequested) {
-                return
-            }
+const createReports = (
+    packageJsonPathList: Array<string>,
+    skipUnchanged: boolean,
+    token: CancellationToken,
+): Array<Report> => packageJsonPathList
+    .filter(packageJsonPath => basename(packageJsonPath) === 'package.json')
+    .map(packageJsonPath => {
+        if (token.isCancellationRequested) { return; }
 
-            const expectedDependencies = _.chain(readFile(packageJsonPath) as object)
-                .pick(['dependencies', 'devDependencies', 'peerDependencies']) // TODO: add 'bundledDependencies'
-                .values()
-                .map(item => _.toPairs<string>(item))
-                .flatten()
-                .value()
+        const expectedDependencies = chain(readFile(packageJsonPath) as object)
+            .pick(['dependencies', 'devDependencies', 'peerDependencies'])
+            .values()
+            .map(item => toPairs<string>(item))
+            .flatten()
+            .value();
 
-            // Skip this file as there is no dependencies written in the file
-            if (expectedDependencies.length === 0) {
-                return
-            }
+        // Skip this file as there is no dependencies written in the file
+        if (expectedDependencies.length === 0) { return; }
 
-            const packageJsonHash = _.fromPairs(expectedDependencies)
-            if (skipUnchanged && lastCheckedDependencies.has(packageJsonPath) && _.isEqual(lastCheckedDependencies.get(packageJsonPath), packageJsonHash)) {
-                return
-            }
-            lastCheckedDependencies.set(packageJsonPath, packageJsonHash)
+        const packageJsonHash = fromPairs(expectedDependencies);
 
-            const dependencies = (
-                getDependenciesFromYarnLock(packageJsonPath, expectedDependencies) ||
-                getDependenciesFromPackageLock(packageJsonPath, expectedDependencies)
-            )
-            if (!dependencies) {
-                return {
-                    packageJsonPath,
-                    problems: [{ toString: () => 'The lock file was missing.' }]
-                }
-            }
+        if (
+            skipUnchanged &&
+            lastCheckedDependencies.has(packageJsonPath) &&
+            isEqual(lastCheckedDependencies.get(packageJsonPath), packageJsonHash)
+        ) { return; }
 
+        lastCheckedDependencies.set(packageJsonPath, packageJsonHash);
+
+        const dependencies = (
+            getDependenciesFromYarnLock(packageJsonPath, expectedDependencies) ||
+            getDependenciesFromPackageLock(packageJsonPath, expectedDependencies)
+        );
+
+        let msg = 'The lock file was missing.';
+
+        if (!dependencies) {
             return {
                 packageJsonPath,
-                problems: _.compact(dependencies.map(item => {
-                    if (!item.lockedVersion && !item.actualVersion) {
-                        return { toString: () => `"${item.name}" was not installed.` }
+                problems: [{ toString: () => msg }]
+            };
+        }
+
+        return {
+            packageJsonPath,
+            problems: compact(dependencies.map(({
+                name,
+                lockedVersion,
+                actualVersion,
+                expectedVersion,
+                path: modulePathForCleaningUp,
+            }) => {
+                if (!lockedVersion) {
+                    msg = `"${name}" was not found in the lock file.`;
+
+                    if (!actualVersion) {
+                        msg = `"${name}" was not installed.`;
                     }
 
-                    if (!item.lockedVersion) {
-                        return { toString: () => `"${item.name}" was not found in the lock file.` }
-                    }
+                    return { toString: () => msg };
+                }
 
-                    if (semver.validRange(item.expectedVersion) && semver.valid(item.lockedVersion) && semver.satisfies(item.lockedVersion, item.expectedVersion) === false) {
-                        return { toString: () => `"${item.name}" was expected to be ${item.expectedVersion} but got ${item.lockedVersion} in the lock file.` }
-                    }
+                if (
+                    validRange(expectedVersion) &&
+                    valid(lockedVersion) &&
+                    satisfies(lockedVersion, expectedVersion) === false
+                ) {
+                    msg = `"${name}" was expected to be ${expectedVersion}`;
+                    msg += ` but got ${lockedVersion} in the lock file.`;
+                    return { toString: () => msg };
+                }
 
-                    if (!item.actualVersion) {
-                        return {
-                            toString: () => `"${item.name}" was not found in /node_module/ directory.`,
-                            moduleCheckingNeeded: true
-                        }
-                    }
+                if (!actualVersion) {
+                    msg = `"${name}" was not found in /node_module/ directory.`;
+                    return { toString: () => msg, moduleCheckingNeeded: true };
+                }
 
-                    if (item.lockedVersion !== item.actualVersion) {
-                        return {
-                            toString: () => `"${item.name}" was expected to be ${item.lockedVersion} but got ${item.actualVersion} in /node_module/ directory.`,
-                            moduleCheckingNeeded: true,
-                            modulePathForCleaningUp: item.path
-                        }
-                    }
-                }))
-            }
-        })
-        .filter(report => report && report.problems.length > 0)
-}
+                if (lockedVersion !== actualVersion) {
+                    msg = `"${name}" was expected to be ${lockedVersion}`;
+                    msg += ` but got ${actualVersion} in /node_module/ directory.`;
+                    return {
+                        toString: () => msg,
+                        modulePathForCleaningUp,
+                        moduleCheckingNeeded: true,
+                    };
+                }
+            }))
+        };
+    })
+    .filter(report => report && report.problems.length > 0);
 
 async function installDependencies(reports: Array<Report> = [], secondTry = false) {
     if (pendingOperation instanceof InstallationOperation) { return; }
@@ -108,92 +127,88 @@ async function installDependencies(reports: Array<Report> = [], secondTry = fals
 
     pendingOperation = new InstallationOperation();
 
-    const token = pendingOperation.token;
+    const { token } = pendingOperation;
 
     outputChannel.clear();
 
     if (token.isCancellationRequested) { return; }
-    if (vscode.workspace.workspaceFolders === undefined) {
-        vscode.window.showErrorMessage('No workspaces opened.', { modal: true });
+    if (workspace.workspaceFolders === undefined) {
+        window.showErrorMessage('No workspaces opened.', { modal: true });
         pendingOperation = null;
         return;
     }
 
     const packageJsonPathList = reports.length === 0
         ? await getPackageJsonPathList()
-        : reports.map(report => report.packageJsonPath);
+        : reports.map(({ packageJsonPath }) => packageJsonPath);
 
     if (token.isCancellationRequested) { return; }
     if (packageJsonPathList.length === 0) {
-        vscode.window.showErrorMessage('No "package.json" found.', { modal: true });
+        window.showErrorMessage('No "package.json" found.', { modal: true });
         pendingOperation = null;
         return;
     }
 
-    const success = await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
+    const success = await window.withProgress({
+        location: ProgressLocation.Notification,
         title: 'Installing node dependencies...',
         cancellable: true,
     }, async (progress, progressToken) => {
         progressToken.onCancellationRequested(() => {
             if (token === pendingOperation.token) {
-                pendingOperation.cancel()
-                pendingOperation = null
+                pendingOperation.cancel();
+                pendingOperation = null;
             }
         });
 
-        const problems = _.chain(reports)
-            .map(report => report.problems)
-            .flatten()
-            .value();
-
+        const problems = chain(reports).map(({ problems }) => problems).flatten().value();
         // Remove the problematic modules from /node_module/ so `--check-files` will work
         for (const problem of problems) {
             if (
                 problem.modulePathForCleaningUp &&
-                fs.existsSync(problem.modulePathForCleaningUp) &&
-                fp.basename(fp.dirname(problem.modulePathForCleaningUp)) === 'node_modules'
+                existsSync(problem.modulePathForCleaningUp) &&
+                basename(dirname(problem.modulePathForCleaningUp)) === 'node_modules'
             ) {
                 try {
-                    fs.removeSync(problem.modulePathForCleaningUp)
-                } catch (error) {
-                    // Do nothing
-                }
+                    removeSync(problem.modulePathForCleaningUp);
+                } catch (error) {}
             }
         }
 
-        const moduleCheckingNeeded = _.some(problems, problem => problem.moduleCheckingNeeded);
+        const moduleCheckingNeeded = some(problems, ({ moduleCheckingNeeded: m }) => m);
 
-        const commands = _.chain(packageJsonPathList)
+        const commands = chain(packageJsonPathList)
             .map(packageJsonPath => {
-                if (token.isCancellationRequested) {
-                    return
-                }
+                if (token.isCancellationRequested) { return; }
 
-                const yarnLockPath = findFileInParentDirectory(fp.dirname(packageJsonPath), 'yarn.lock')
+                const yarnLockPath = findFileInParentDirectory(dirname(packageJsonPath), 'yarn.lock');
+                const isRunningchildYarnProcess = spawnSync('which', ['yarn']).status === 0
+                    && existsSync(join(dirname(packageJsonPath), 'package-lock.json')) === false;
+
                 if (
-                    fs.existsSync(fp.join(fp.dirname(packageJsonPath), 'yarn.lock')) ||
+                    existsSync(join(dirname(packageJsonPath), 'yarn.lock')) ||
                     checkYarnWorkspace(packageJsonPath, yarnLockPath) ||
-                    cp.spawnSync('which', ['yarn']).status === 0 && fs.existsSync(fp.join(fp.dirname(packageJsonPath), 'package-lock.json')) === false
+                    isRunningchildYarnProcess
                 ) {
                     return {
+                        packageJsonPath,
                         command: 'yarn install',
-                        parameters: [(moduleCheckingNeeded || secondTry) && '--check-files', secondTry && '--force'],
-                        directory: fp.dirname(yarnLockPath || packageJsonPath),
-                        packageJsonPath,
-                    }
-
-                } else {
-                    return {
-                        command: 'npm install',
-                        parameters: [secondTry && '--force'],
-                        directory: fp.dirname(packageJsonPath),
-                        packageJsonPath,
-                    }
+                        directory: dirname(yarnLockPath || packageJsonPath),
+                        parameters: [
+                            (moduleCheckingNeeded || secondTry) && '--check-files',
+                            secondTry && '--force',
+                        ],
+                    };
                 }
+
+                return {
+                    packageJsonPath,
+                    command: 'npm install',
+                    directory: dirname(packageJsonPath),
+                    parameters: [secondTry && '--force'],
+                };
             })
-            .compact()
-            .map(item => ({ ...item, parameters: _.compact(item.parameters) }))
+            .compact().map(item => ({ ...item, parameters: compact(item.parameters) }))
             .uniqBy(({ directory }) => directory)
             .sortBy(({ directory }) => directory.length)
             .value();
@@ -201,370 +216,310 @@ async function installDependencies(reports: Array<Report> = [], secondTry = fals
         const progressWidth = 100 / commands.length;
 
         for (const { command, parameters, directory, packageJsonPath } of commands) {
-            if (token.isCancellationRequested) {
-                return
-            }
+            if (token.isCancellationRequested) { return; }
 
-            outputChannel.appendLine('')
-            outputChannel.appendLine(packageJsonPath.replace(/\\/g, '/'))
+            outputChannel.appendLine('');
+            outputChannel.appendLine(packageJsonPath.replace(/\\/g, '/'));
 
-            let nowStep = 0
-            let maxStep = 1
+            let nowStep = 0;
+            let maxStep = 1;
 
             const exitCode = await new Promise<number>(resolve => {
-                const worker = cp.spawn(command, parameters, { cwd: directory, shell: true })
+                const worker = spawn(command, parameters, {
+                    cwd: directory,
+                    shell: true,
+                });
+
                 worker.stdout.on('data', text => {
-                    outputChannel.append('  ' + text)
+                    outputChannel.append(`  ${text}`);
 
                     if (command === 'yarn install') {
-                        const steps = text.toString().match(/^\[(\d)\/(\d)\]\s/)
+                        const steps = text.toString().match(/^\[(\d)\/(\d)\]\s/);
+
                         if (steps) {
-                            maxStep = +steps[2]
-                            progress.report({ increment: Math.floor((+steps[1] - nowStep) / maxStep * progressWidth) })
-                            nowStep = +steps[1]
+                            maxStep = +steps[2];
+                            progress.report({ increment: Math.floor((+steps[1] - nowStep) / maxStep * progressWidth) });
+                            nowStep = +steps[1];
                         }
                     }
-                })
-                worker.stderr.on('data', text => {
-                    outputChannel.append('  ' + text)
-                })
+                });
+
+                worker.stderr.on('data', text => { outputChannel.append(`  ${text}`); });
+
                 worker.on('exit', code => {
-                    progress.report({ increment: Math.floor((maxStep - nowStep) / maxStep * progressWidth) })
+                    progress.report({
+                        increment: Math.floor((maxStep - nowStep) / maxStep * progressWidth),
+                    });
+                    resolve(code);
+                });
 
-                    resolve(code)
-                })
+                token.onCancellationRequested(() => { worker.kill(); });
+            });
 
-                token.onCancellationRequested(() => {
-                    worker.kill()
-                })
-            })
-
-            if (token.isCancellationRequested) {
-                return
-            }
-
+            if (token.isCancellationRequested) { return; }
             if (exitCode !== 0) {
-                vscode.window.showErrorMessage(
-                    `There was an error running "${command}".`,
-                    { title: 'Show Errors', action: () => { outputChannel.show() } }
-                ).then(selectOption => {
-                    if (selectOption) {
-                        selectOption.action()
-                    }
-                })
-                return
+                const errMsg = `There was an error running "${command}".`;
+                const showErrs = { title: 'Show Errors', action: () => { outputChannel.show(); } };
+
+                return window.showErrorMessage(errMsg, showErrs)
+                    .then(selectOption => selectOption && selectOption.action());
             }
         }
 
         return true;
     });
 
-    if (token === pendingOperation.token) {
-        pendingOperation = null
-    }
+    if (token === pendingOperation.token) { pendingOperation = null; }
+    if (token.isCancellationRequested || !success || secondTry) { return; }
 
-    if (token.isCancellationRequested) {
-        return
-    }
+    const reviews = await createReports(packageJsonPathList, false, token);
 
-    if (!success) {
-        return
-    }
+    printReports(reviews, token);
 
-    if (secondTry) {
-        return
-    }
-
-    const reviews = await createReports(packageJsonPathList, false, token)
-    printReports(reviews, token)
     if (reviews.length > 0) {
-        vscode.window.showWarningMessage(
-            'There were still some problems regarding the node dependencies.',
-            {
-                title: 'Reinstall Dependencies',
-                action: () => {
-                    installDependencies(reviews, true)
-                }
-            },
-            {
-                title: 'Show Problems',
-                action: () => {
-                    outputChannel.show()
-                }
-            },
-        ).then(selectOption => {
-            if (selectOption) {
-                selectOption.action()
-            }
-        })
+        const outdatedMsg = 'There were still some problems regarding the node dependencies.';
+        const reInstallDeps = {
+            title: 'Reinstall Dependencies',
+            action: () => { installDependencies(reviews, true); },
+        };
+        const showProblems = {
+            title: 'Show Problems',
+            action: () => { outputChannel.show(); },
+        };
 
-    } else {
-        vscode.window.showInformationMessage('The node dependencies are installed successfully.')
+        return window.showWarningMessage(outdatedMsg, reInstallDeps, showProblems)
+            .then(selectOption => selectOption && selectOption.action());
     }
+
+    return window.showInformationMessage('The node dependencies are installed successfully.');
 }
 
-async function checkDependencies(packageJsonPathList: Array<string>, skipUnchanged: boolean, token: vscode.CancellationToken) {
+async function checkDependencies(
+    packageJsonPathList: Array<string>,
+    skipUnchanged: boolean,
+    token: CancellationToken,
+) {
     const reports = createReports(packageJsonPathList, skipUnchanged, token);
 
-    if (token.isCancellationRequested) {
-        return;
-    }
-
-    if (reports.length === 0) {
-        return true;
-    }
+    if (token.isCancellationRequested) { return; }
+    if (reports.length === 0) { return true; }
 
     printReports(reports, token);
 
-    if (token.isCancellationRequested) {
-        return;
-    }
+    if (token.isCancellationRequested) { return; }
 
     const outdatedMsg = 'One or more node dependencies were outdated.';
     const installDeps = {
         title: 'Install Dependencies',
-        action: () => {
-            installDependencies(reports);
-        }
+        action: () => { installDependencies(reports); },
     };
     const showProblems = {
         title: 'Show Problems',
-        action: () => {
-            outputChannel.show();
-        }
+        action: () => { outputChannel.show(); },
     };
 
-    vscode.window.showWarningMessage(outdatedMsg, installDeps, showProblems)
-        .then(selectOption => {
-            if (selectOption) {
-                selectOption.action();
-            }
-        });
+    return window.showWarningMessage(outdatedMsg, installDeps, showProblems)
+        .then(selectOption => { if (selectOption) { selectOption.action(); } });
 }
 
-function printReports(reports: Array<Report>, token: vscode.CancellationToken) {
+function printReports(reports: Array<Report>, token: CancellationToken) {
     for (const { packageJsonPath, problems } of reports) {
-        if (token.isCancellationRequested) {
-            return;
-        }
+        if (token.isCancellationRequested) { return; }
 
         outputChannel.appendLine('');
         outputChannel.appendLine(packageJsonPath);
 
         for (const problem of problems) {
-            if (token.isCancellationRequested) {
-                return;
-            }
-            outputChannel.appendLine('  ' + problem);
+            if (token.isCancellationRequested) { return; }
+            outputChannel.appendLine(`  ${problem}`);
         }
     }
 }
 
 function findFileInParentDirectory(path: string, name: string, stop?: string) {
-    const pathList = path.split(fp.sep);
+    const pathList = path.split(sep);
+
     while (pathList.length > 1) {
-        const workPath = [...pathList, name].join(fp.sep);
-        if (stop && workPath.startsWith(stop) === false) {
-            break;
-        }
-        if (fs.existsSync(workPath)) {
-            return workPath;
-        }
+        const workPath = [...pathList, name].join(sep);
+        if (stop && workPath.startsWith(stop) === false) { break; }
+        if (existsSync(workPath)) { return workPath; }
         pathList.pop();
     }
 }
 
-function getDependenciesFromPackageLock(packageJsonPath: string, expectedDependencies: Array<[string, string]>) {
-    const packageLockPath = fp.join(fp.dirname(packageJsonPath), 'package-lock.json');
+function getDependenciesFromPackageLock(
+    packageJsonPath: string,
+    expectedDependencies: Array<[string, string]>,
+) {
+    const packageLockPath = join(dirname(packageJsonPath), 'package-lock.json');
 
-    if (!fs.existsSync(packageLockPath)) {
-        return null;
-    }
+    if (!existsSync(packageLockPath)) { return null; }
 
-    const nameObjectHash = _.get(readFile(packageLockPath), 'dependencies', {}) as { [key: string]: { version: string } };
-    const nameVersionHash = _.mapValues(nameObjectHash, item => item.version);
+    const nameObjectHash = get(readFile(packageLockPath), 'dependencies', {}) as {
+        [key: string]: { version: string },
+    };
+    const nameVersionHash = mapValues(nameObjectHash, item => item.version);
 
     return expectedDependencies.map(([name, expectedVersion]) => {
-        const lockedVersion = nameVersionHash[name];
-        const modulePath = fp.join(fp.dirname(packageJsonPath), 'node_modules', name, 'package.json');
-        const actualVersion = _.get(readFile(modulePath), 'version') as string;
+        const modulePath = join(dirname(packageJsonPath), 'node_modules', name, 'package.json');
+        const actualVersion = get(readFile(modulePath), 'version') as string;
 
         return {
-            name, path: fp.dirname(modulePath),
-            expectedVersion, lockedVersion, actualVersion
+            name,
+            actualVersion,
+            expectedVersion,
+            path: dirname(modulePath),
+            lockedVersion: nameVersionHash[name],
         };
     });
 }
 
-function getDependenciesFromYarnLock(packageJsonPath: string, expectedDependencies: Array<[string, string]>) {
-    const yarnLockPath = findFileInParentDirectory(fp.dirname(packageJsonPath), 'yarn.lock');
-    if (!yarnLockPath) {
-        return null;
-    }
+export function getDependenciesFromYarnLock(
+    packageJsonPath: string,
+    expectedDependencies: Array<[string, string]>,
+) {
+    const yarnLockPath = findFileInParentDirectory(dirname(packageJsonPath), 'yarn.lock');
 
+    if (!yarnLockPath) { return null; }
     // Stop processing if the current directory is not part of the Yarn Workspace
-    if (fp.dirname(yarnLockPath) !== fp.dirname(packageJsonPath) && !checkYarnWorkspace(packageJsonPath, yarnLockPath)) {
-        return null;
-    }
+    if (
+        dirname(yarnLockPath) !== dirname(packageJsonPath)
+        && !checkYarnWorkspace(packageJsonPath, yarnLockPath)
+    ) { return null; }
 
-    const nameObjectHash = _.get(readFile(yarnLockPath), 'object', {}) as { [key: string]: { version: string } };
-    const nameVersionHash = _.mapValues(nameObjectHash, item => item.version);
+    const nameObjectHash = get(readFile(yarnLockPath), 'object', {}) as {
+        [key: string]: { version: string },
+    };
+    const nameVersionHash = mapValues(nameObjectHash, item => item.version);
 
     return expectedDependencies.map(([name, expectedVersion]) => {
-        let lockedVersion = (
-            nameVersionHash[name + '@' + expectedVersion] ||
-            _.findLast(nameVersionHash, (version, nameAtVersion) => nameAtVersion.startsWith(name + '@'))
-        );
-
         const modulePath = findFileInParentDirectory(
-            fp.dirname(packageJsonPath),
-            fp.join('node_modules', name, 'package.json'),
-            fp.dirname(yarnLockPath)
+            dirname(packageJsonPath),
+            join('node_modules', name, 'package.json'),
+            dirname(yarnLockPath),
         );
-        const actualVersion = _.get(readFile(modulePath), 'version') as string;
 
         return {
-            name, path: modulePath ? fp.dirname(modulePath) : undefined,
-            expectedVersion, lockedVersion, actualVersion
+            name,
+            expectedVersion,
+            path: modulePath ? dirname(modulePath) : undefined,
+            actualVersion: get(readFile(modulePath), 'version') as string,
+            lockedVersion: (nameVersionHash[`${name}@${expectedVersion}`] ||
+                findLast(nameVersionHash, (version, atVersion) =>
+                    atVersion.startsWith(`${name}@${version}`))),
         };
-    })
+    });
 }
 
 function checkYarnWorkspace(packageJsonPath: string, yarnLockPath: string) {
-    if (!packageJsonPath || !yarnLockPath) {
-        return false;
-    }
+    if (!packageJsonPath || !yarnLockPath) { return false; }
 
     // See https://yarnpkg.com/lang/en/docs/workspaces/
-    const packageJsonForYarnWorkspace = readFile(fp.join(fp.dirname(yarnLockPath), 'package.json')) as { private?: boolean, workspaces?: Array<string> };
-    if (!packageJsonForYarnWorkspace || packageJsonForYarnWorkspace.private !== true || !packageJsonForYarnWorkspace.workspaces) {
-        return false;
-    }
+    const packageJsonForYarnWorkspace = readFile(join(dirname(yarnLockPath), 'package.json')) as {
+        private?: boolean,
+        workspaces?: Array<string>,
+    };
 
-    const yarnWorkspacePathList = _.chain(packageJsonForYarnWorkspace.workspaces)
-        .map(pathOrGlob => glob.sync(pathOrGlob, { cwd: fp.dirname(yarnLockPath), absolute: true }))
+    if (
+        !packageJsonForYarnWorkspace ||
+        packageJsonForYarnWorkspace.private !== true ||
+        !packageJsonForYarnWorkspace.workspaces
+    ) { return false; }
+
+    const yarnWorkspacePathList = chain(packageJsonForYarnWorkspace.workspaces)
+        .map(pathOrGlob => sync(pathOrGlob, { cwd: dirname(yarnLockPath), absolute: true }))
         .flatten()
-        .map(path => path.replace(/\//g, fp.sep))
+        .map(path => path.replace(/\//g, sep))
         .value();
-    if (_.includes(yarnWorkspacePathList, fp.dirname(packageJsonPath))) {
-        return true;
-    }
+
+    if (includes(yarnWorkspacePathList, dirname(packageJsonPath))) { return true; }
 
     return false;
 }
 
 function readFile(filePath: string): object | string {
+    let test;
     try {
-        const text = fs.readFileSync(filePath, 'utf-8');
-        if (fp.extname(filePath) === '.json') {
-            return JSON.parse(text);
-        } else if (fp.basename(filePath) === 'yarn.lock') {
-            return yarn.parse(text);
-        }
-        return text;
-
-    } catch (error) {
-        return null;
+        test = readFileSync(filePath, 'utf-8');
+        if (extname(filePath) === '.json') { test = JSON.parse(test); }
+        if (basename(filePath) === 'yarn.lock') { test = yarnParse(test); }
+    } catch (e) {
+        test = null;
     }
+    return test;
 }
 
-export async function activate(context: vscode.ExtensionContext) {
-    outputChannel = vscode.window.createOutputChannel('Package Watch')
+export async function activate(context: ExtensionContext) {
+    outputChannel = window.createOutputChannel('Package Watch');
 
     const queue: Array<string> = [];
-    const defer = _.debounce(async () => {
-        if (pendingOperation) {
-            return;
-        }
+    const cmdCheck = 'packageWatch.checkDependencies';
+    const cmdInstall = 'packageWatch.installDependencies';
+    const watchingFiles = '**/{package.json,package-lock.json,yarn.lock}';
+
+    const defer = debounce(async () => {
+        if (pendingOperation) { return; }
 
         pendingOperation = new CheckingOperation();
-        const token = pendingOperation.token;
+        const { token } = pendingOperation;
 
-        if (queue.length === 0) {
-            return;
-        }
+        if (queue.length === 0) { return; }
 
         queue.splice(0, queue.length);
 
-        const packageJsonPathList = _.uniq(queue);
+        const packageJsonPathList = uniq(queue);
+
         await checkDependencies(packageJsonPathList, true, token);
 
-        if (token === pendingOperation.token) {
-            pendingOperation = null;
-        }
-        if (queue.length > 0) {
-            defer();
-        }
+        if (token === pendingOperation.token) { pendingOperation = null; }
+        if (queue.length > 0) { defer(); }
     }, 300);
 
     const batch = (path: string | Array<string>) => {
-        if (pendingOperation instanceof InstallationOperation) {
-            return;
-        }
-
+        if (pendingOperation instanceof InstallationOperation) { return; }
         if (typeof path === 'string') {
             queue.push(path);
         } else {
             queue.push(...path);
         }
-
         defer();
-    }
+    };
 
-    const watchingFiles = '**/{package.json,package-lock.json,yarn.lock}';
-
-    fileWatcher = vscode.workspace.createFileSystemWatcher(watchingFiles, false, false, true);
+    fileWatcher = workspace.createFileSystemWatcher(watchingFiles, false, false, true);
 
     context.subscriptions.push(fileWatcher.onDidCreate(async link => {
-        if (fp.basename(link.fsPath) === 'package.json') {
-            batch(link.fsPath);
-        }
-    }))
+        if (basename(link.fsPath) === 'package.json') { batch(link.fsPath); }
+    }));
 
     context.subscriptions.push(fileWatcher.onDidChange(async link => {
-        if (fp.basename(link.fsPath) === 'package.json') {
-            batch(link.fsPath);
-        } else if (fp.basename(link.fsPath) === 'package-lock.json') {
-            batch(fp.join(fp.dirname(link.fsPath), 'package.json'));
-        } else { // In case of 'yarn.lock'
-            batch(await getPackageJsonPathList());
+        if (basename(link.fsPath) === 'package.json') {
+            return batch(link.fsPath);
         }
-    }))
+        if (basename(link.fsPath) === 'package-lock.json') {
+            return batch(join(dirname(link.fsPath), 'package.json'));
+        }
+        batch(await getPackageJsonPathList());
+    }));
 
-    context.subscriptions.push(vscode.commands.registerCommand('packageWatch.checkDependencies', async () => {
-        if (pendingOperation) {
-            pendingOperation.cancel();
-        }
+    context.subscriptions.push(commands.registerCommand(cmdCheck, async () => {
+        if (pendingOperation) { pendingOperation.cancel(); }
 
         pendingOperation = new CheckingOperation();
-        const token = pendingOperation.token;
+        const { token } = pendingOperation;
         outputChannel.clear();
         const success = await checkDependencies(await getPackageJsonPathList(), false, token);
 
-        if (success) {
-            vscode.window.showInformationMessage('The node dependencies are in-sync.');
-        }
+        if (success) { window.showInformationMessage('The node dependencies are in-sync.'); }
+        if (token === pendingOperation.token) { pendingOperation = null; }
+    }));
 
-        if (token === pendingOperation.token) {
-            pendingOperation = null;
-        }
-    }))
-
-    context.subscriptions.push(vscode.commands.registerCommand('packageWatch.installDependencies', installDependencies));
+    context.subscriptions.push(commands.registerCommand(cmdInstall, installDependencies));
 
     batch(await getPackageJsonPathList());
 }
 
 export function deactivate() {
-    if (pendingOperation) {
-        pendingOperation.cancel();
-    }
-
-    if (fileWatcher) {
-        fileWatcher.dispose();
-    }
-
-    if (outputChannel) {
-        outputChannel.dispose();
-    }
+    if (pendingOperation) { pendingOperation.cancel(); }
+    if (fileWatcher) { fileWatcher.dispose(); }
+    if (outputChannel) { outputChannel.dispose(); }
 }

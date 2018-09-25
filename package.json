@@ -1,6 +1,6 @@
 {
     "name": "package-watch",
-    "displayName": "Joaquin's Package Watch",
+    "displayName": "joaquins-package-watch",
     "description": "VSCode extension that checks and installs the local node dependencies.",
     "version": "0.0.1",
     "publisher": "Joaquin Briceno",
@@ -20,16 +20,16 @@
     "bugs": {
         "url": "https://github.com/Joaquin6/vscode-package-watch/issues"
     },
-    "icon": "docs/logo.png",
+    "icon": "images/logo.png",
     "galleryBanner": {
         "color": "#212121",
         "theme": "dark"
     },
     "engines": {
-        "vscode": "^1.22.0"
+        "vscode": "^1.27.0"
     },
     "activationEvents": [
-        "workspaceContains:**/package.json"
+        "workspaceContains:package.json"
     ],
     "main": "./dist/extension",
     "contributes": {
@@ -45,28 +45,54 @@
         ]
     },
     "scripts": {
-        "postinstall": "node ./node_modules/vscode/bin/install",
-        "compile": "tsc --watch --project ./",
-        "vscode:prepublish": "tsc --skipLibCheck --project ./",
+        "precompile": "rm -rf ./dist",
+        "compile": "tsc -p ./",
+        "vscode:prepublish": "yarn compile",
         "preversion": "git push --dry-run origin master:master",
+        "postinstall": "node ./node_modules/vscode/bin/install",
+        "postversion": "git push --tags --quiet origin master:master",
+        "test": "yarn compile && node ./node_modules/vscode/bin/test",
         "version": "vsce publish",
-        "postversion": "git push --tags --quiet origin master:master"
+        "watch": "tsc -watch -p ./"
+    },
+    "dependencies": {
+        "@yarnpkg/lockfile": "^1.1.0",
+        "fs-extra": "^6.0.1",
+        "glob": "^7.1.2",
+        "lodash": "4.17.11",
+        "request": "^2.88.0",
+        "semver": "^5.5.0",
+        "typescript": "^3.0.3",
+        "vscode": "1.1.21",
+        "vscode-chrome-debug-core": "6.7.19",
+        "vscode-debugadapter": "1.32.1",
+        "vscode-extension-telemetry": "^0.0.21",
+        "vscode-languageclient": "^5.1.0",
+        "vscode-nls": "4.0.0"
     },
     "devDependencies": {
+        "@types/babel-types": "^7.0.4",
+        "@types/expect": "^1.20.3",
         "@types/fs-extra": "^5.0.4",
         "@types/glob": "^5.0.35",
         "@types/lodash": "^4.14.110",
-        "@types/node": "^8.0.0",
+        "@types/mocha": "^5.2.5",
+        "@types/node": "^10.11.0",
         "@types/semver": "^5.5.0",
-        "@types/typescript": "^2.0.0",
-        "vscode": "^1.1.18"
-    },
-    "dependencies": {
-        "@yarnpkg/lockfile": "^1.0.2",
-        "fs-extra": "^6.0.1",
-        "glob": "^7.1.2",
-        "lodash": "^4.17.10",
-        "semver": "^5.5.0",
-        "typescript": "^2.9.2"
+        "babel-cli": "^6.26.0",
+        "babel-preset-env": "^1.7.0",
+        "babel-register": "^6.26.0",
+        "chai": "^4.1.2",
+        "coveralls": "^3.0.2",
+        "eslint": "^5.6.0",
+        "mocha": "^5.2.0",
+        "ts-mocha": "^2.0.0",
+        "ts-node": "^7.0.1",
+        "tslint": "^5.11.0",
+        "vscode-chrome-debug-core-testsupport": "4.0.0",
+        "vscode-debugadapter-testsupport": "1.32.0",
+        "vscode-debugprotocol": "1.32.0",
+        "vscode-nls-dev": "^3.2.2",
+        "vscode-xterm": "3.8.0-beta5"
     }
 }

@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "eg2.tslint",
+    "maty.vscode-mocha-sidebar",
+    "spoonscen.es6-mocha-snippets"
+  ]
+}
