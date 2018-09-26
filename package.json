@@ -2,8 +2,8 @@
     "name": "package-watch",
     "displayName": "Joaquin's Package Watch",
     "description": "VSCode extension that checks and installs the local node dependencies.",
-    "version": "0.0.1",
-    "publisher": "joaquin6",
+    "version": "0.1.0",
+    "publisher": "joaquinbriceno",
     "author": {
         "name": "Joaquin Briceno",
         "email": "joaquinbriceno1@gmail.com"
