@@ -70,14 +70,14 @@
     "scripts": {
         "precompile": "rm -rf ./dist",
         "compile": "tsc -p ./",
-        "vscode:prepublish": "yarn compile",
         "preversion": "git push --dry-run origin master:master",
-        "postinstall": "node ./node_modules/vscode/bin/install",
+        "version": "vsce publish",
         "postversion": "git push --tags --quiet origin master:master",
+        "postinstall": "node ./node_modules/vscode/bin/install",
         "pretest": "yarn lint",
         "test": "yarn compile && node ./node_modules/vscode/bin/test",
         "lint": "tslint src/**/*.ts",
-        "version": "vsce publish",
+        "vscode:prepublish": "yarn compile",
         "watch": "tsc -watch -p ./"
     },
     "dependencies": {

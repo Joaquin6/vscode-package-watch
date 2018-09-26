@@ -3,6 +3,7 @@
     "dbaeumer.vscode-eslint",
     "eg2.tslint",
     "maty.vscode-mocha-sidebar",
+    "ms-devlabs.extension-manifest-editor",
     "spoonscen.es6-mocha-snippets"
   ]
 }
