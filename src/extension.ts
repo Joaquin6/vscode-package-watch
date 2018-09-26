@@ -5,10 +5,19 @@ import { sync } from 'glob';
 import { parse as yarnParse } from '@yarnpkg/lockfile';
 import { satisfies, valid, validRange } from 'semver';
 import { existsSync, readFileSync, removeSync } from 'fs-extra';
-import { chain, compact, debounce, get, includes, isEqual, findLast, fromPairs, mapValues, some, toPairs, uniq } from 'lodash';
+import { chain, compact, debounce, get, includes, isEmpty, isEqual, findLast, fromPairs, mapValues, some, toPairs, uniq } from 'lodash';
 import { window, workspace, commands, CancellationToken, CancellationTokenSource, ExtensionContext, FileSystemWatcher, OutputChannel, ProgressLocation } from 'vscode';
 
+import * as config from './helpers/config';
+import * as logger from './helpers/logger';
+
+logger.logInfo('Extension module is loaded');
+
+const queue: Array<string> = [];
 const lastCheckedDependencies = new Map();
+const cmdCheck: string = 'joaquinsPackageWatch.checkDependencies';
+const cmdInstall: string = 'joaquinsPackageWatch.installDependencies';
+const watchingFiles: string = '**/{package.json,package-lock.json,yarn.lock}';
 
 class CheckingOperation extends CancellationTokenSource {}
 class InstallationOperation extends CancellationTokenSource {}
@@ -47,7 +56,7 @@ const createReports = (
             .value();
 
         // Skip this file as there is no dependencies written in the file
-        if (expectedDependencies.length === 0) { return; }
+        if (isEmpty(expectedDependencies)) { return; }
 
         const packageJsonHash = fromPairs(expectedDependencies);
 
@@ -124,6 +133,8 @@ const createReports = (
 async function installDependencies(reports: Array<Report> = [], secondTry = false) {
     if (pendingOperation instanceof InstallationOperation) { return; }
     if (pendingOperation instanceof CheckingOperation) { pendingOperation.cancel(); }
+
+    logger.logInfo('Installing Dependencies');
 
     pendingOperation = new InstallationOperation();
 
@@ -291,7 +302,7 @@ async function installDependencies(reports: Array<Report> = [], secondTry = fals
             .then(selectOption => selectOption && selectOption.action());
     }
 
-    return window.showInformationMessage('The node dependencies are installed successfully.');
+    return window.showInformationMessage('Successfully installed node dependencies.');
 }
 
 async function checkDependencies(
@@ -299,16 +310,22 @@ async function checkDependencies(
     skipUnchanged: boolean,
     token: CancellationToken,
 ) {
+    logger.logInfo('Checking Dependencies');
+
     const reports = createReports(packageJsonPathList, skipUnchanged, token);
 
     if (token.isCancellationRequested) { return; }
-    if (reports.length === 0) { return true; }
+    if (isEmpty(reports)) { return true; }
 
     printReports(reports, token);
 
     if (token.isCancellationRequested) { return; }
 
-    const outdatedMsg = 'One or more node dependencies were outdated.';
+    /**
+     * @todo Think about perhaps running `installDependencies(reports)` immidiately instaed of
+     * asking via a warning message. This can be enabled maybe thru a settings option.
+     */
+    const outdatedMsg = 'Detected outdated node dependencies.';
     const installDeps = {
         title: 'Install Dependencies',
         action: () => { installDependencies(reports); },
@@ -382,8 +399,8 @@ export function getDependenciesFromYarnLock(
     if (!yarnLockPath) { return null; }
     /** Stop processing if the current directory is not part of the Yarn Workspace */
     if (
-        dirname(yarnLockPath) !== dirname(packageJsonPath)
-        && !checkYarnWorkspace(packageJsonPath, yarnLockPath)
+        dirname(yarnLockPath) !== dirname(packageJsonPath) &&
+        !checkYarnWorkspace(packageJsonPath, yarnLockPath)
     ) { return null; }
 
     const nameObjectHash = get(readFile(yarnLockPath), 'object', {}) as {
@@ -442,42 +459,65 @@ export function readFile(filePath: string): object | string {
         test = readFileSync(filePath, 'utf-8');
         if (extname(filePath) === '.json') { test = JSON.parse(test); }
         if (basename(filePath) === 'yarn.lock') { test = yarnParse(test); }
-    } catch (e) {
+    } catch (error) {
         test = null;
     }
     return test;
 }
 
 export async function activate(context: ExtensionContext) {
-    outputChannel = window.createOutputChannel('Package Watch');
+    outputChannel = window.createOutputChannel('Joaquin\'s Package Watcher');
+    logger.logInfo('Activating Joaquins Package Watch');
 
-    const queue: Array<string> = [];
-    const cmdCheck = 'packageWatch.checkDependencies';
-    const cmdInstall = 'packageWatch.installDependencies';
-    const watchingFiles = '**/{package.json,package-lock.json,yarn.lock}';
+    let configuration;
 
     const defer = debounce(async () => {
-        if (pendingOperation) { return; }
+        logger.logInfo('Running Defer');
+
+        if (pendingOperation) {
+            logger.logInfo('Defer Return - Operation Pending');
+            return;
+        }
 
         pendingOperation = new CheckingOperation();
         const { token } = pendingOperation;
 
-        if (queue.length === 0) { return; }
-
-        queue.splice(0, queue.length);
+        if (isEmpty(queue)) {
+            logger.logInfo('Defer Return - Nothing in the queue');
+            return;
+        }
 
         const packageJsonPathList = uniq(queue);
+        queue.splice(0, queue.length);
+
+
+        if (isEmpty(packageJsonPathList)) {
+            logger.logInfo('Defer Return - Nothing in the package json path list');
+            return;
+        }
+
+        logger.logInfo(`Defer - Check Dependencies in paths => ${JSON.stringify(packageJsonPathList, null, 2)}`);
+        logger.logInfo(`Defer - Check Dependencies with token => ${token}`);
 
         await checkDependencies(packageJsonPathList, true, token);
 
         if (token === pendingOperation.token) { pendingOperation = null; }
-        if (queue.length > 0) { defer(); }
+        if (!isEmpty(queue)) { defer(); }
     }, 300);
 
-    const batch = (path: string | Array<string>) => {
-        if (pendingOperation instanceof InstallationOperation) { return; }
+    const batch = async (path: string | Array<string>) => {
+        logger.logInfo(`Running Batch on Path<${typeof path}> - ${typeof path === 'string' ? path : JSON.stringify(path, null, 2)}`);
+        if (pendingOperation instanceof InstallationOperation) {
+            logger.logInfo('Batch Return - "pendingOperation" is an instance of "InstallationOperation"');
+            return;
+        }
         if (typeof path === 'string') {
-            queue.push(path);
+            if (!configuration) {
+                configuration = await config.getConfiguration(path);
+            }
+            if (!includes(queue, path)) {
+                queue.push(path);
+            }
         } else {
             queue.push(...path);
         }
@@ -486,16 +526,18 @@ export async function activate(context: ExtensionContext) {
 
     fileWatcher = workspace.createFileSystemWatcher(watchingFiles, false, false, true);
 
-    context.subscriptions.push(fileWatcher.onDidCreate(async link => {
-        if (basename(link.fsPath) === 'package.json') { batch(link.fsPath); }
+    context.subscriptions.push(fileWatcher.onDidCreate(async ({ fsPath }) => {
+        logger.logInfo(`fileWatcher.onDidCreate - Checking Dependencies in ${fsPath}`);
+        if (basename(fsPath) === 'package.json') { batch(fsPath); }
     }));
 
-    context.subscriptions.push(fileWatcher.onDidChange(async link => {
-        if (basename(link.fsPath) === 'package.json') {
-            return batch(link.fsPath);
+    context.subscriptions.push(fileWatcher.onDidChange(async ({ fsPath }) => {
+        logger.logInfo(`fileWatcher.onDidChange - Checking Dependencies in ${fsPath}`);
+        if (basename(fsPath) === 'package.json') {
+            return batch(fsPath);
         }
-        if (basename(link.fsPath) === 'package-lock.json') {
-            return batch(join(dirname(link.fsPath), 'package.json'));
+        if (basename(fsPath) === 'package-lock.json') {
+            return batch(join(dirname(fsPath), 'package.json'));
         }
         batch(await getPackageJsonPathList());
     }));
@@ -515,10 +557,14 @@ export async function activate(context: ExtensionContext) {
     context.subscriptions.push(commands.registerCommand(cmdInstall, installDependencies));
 
     batch(await getPackageJsonPathList());
+
+    logger.logInfo('Successfully Activated Joaquins Package Watch');
 }
 
 export function deactivate() {
+    logger.logInfo('Deactivating Joaquins Package Watch');
     if (pendingOperation) { pendingOperation.cancel(); }
     if (fileWatcher) { fileWatcher.dispose(); }
     if (outputChannel) { outputChannel.dispose(); }
+    logger.logInfo('Successfully Deactivated Joaquins Package Watch');
 }

@@ -1,12 +1,13 @@
 .gitignore
 .vscode/**
 .vscode-test/**
+typings/**
 src/**
 test
 **/*.map
+jsconfig.json
 tsconfig.json
 dist/test/**
 dist/**/*.map
 vsc-extension-quickstart.md
 tslint.json
-

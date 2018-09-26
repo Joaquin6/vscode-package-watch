@@ -13,6 +13,15 @@
                 "kind": "build",
                 "isDefault": true
             }
-        }
+        },
+        {
+			"type": "npm",
+			"script": "compile",
+            "problemMatcher": "$tsc-watch",
+            "isBackground": true,
+			"presentation": {
+				"reveal": "silent"
+			}
+		}
     ]
 }

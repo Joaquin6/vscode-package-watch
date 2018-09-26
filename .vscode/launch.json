@@ -14,7 +14,7 @@
             "outFiles": [
                 "${workspaceRoot}/dist/**/*.js"
             ],
-            "preLaunchTask": "npm"
+            "preLaunchTask": "npm: compile"
         },
         {
             "name": "Extension Watch",
@@ -35,13 +35,14 @@
 			"request": "launch",
 			"runtimeExecutable": "${execPath}",
 			"args": [
+                "--disable-extensions",
                 "--extensionDevelopmentPath=${workspaceRoot}",
                 "--extensionTestsPath=${workspaceRoot}/dist/test"
             ],
 			"stopOnEntry": false,
 			"sourceMaps": true,
 			"outFiles": [
-                "${workspaceRoot}/dist/**/*.test.js"
+                "${workspaceRoot}/dist/test/**/*.js"
             ],
 			"preLaunchTask": "npm: watch"
         }

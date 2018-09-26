@@ -1,9 +1,13 @@
 {
     "name": "package-watch",
-    "displayName": "joaquins-package-watch",
+    "displayName": "Joaquin's Package Watch",
     "description": "VSCode extension that checks and installs the local node dependencies.",
     "version": "0.0.1",
-    "publisher": "Joaquin Briceno",
+    "publisher": "joaquin6",
+    "author": {
+        "name": "Joaquin Briceno",
+        "email": "joaquinbriceno1@gmail.com"
+    },
     "categories": [
         "Other"
     ],
@@ -29,18 +33,37 @@
         "vscode": "^1.27.0"
     },
     "activationEvents": [
-        "workspaceContains:package.json"
+        "workspaceContains:**/package.json"
     ],
     "main": "./dist/extension",
     "contributes": {
         "commands": [
             {
-                "command": "packageWatch.checkDependencies",
-                "title": "Package Watch: Check Dependencies"
+                "category": "Package Watch",
+                "command": "joaquinsPackageWatch.checkDependencies",
+                "title": "Check Dependencies"
             },
             {
-                "command": "packageWatch.installDependencies",
-                "title": "Package Watch: Install Dependencies"
+                "category": "Package Watch",
+                "command": "joaquinsPackageWatch.installDependencies",
+                "title": "Install Dependencies"
+            }
+        ],
+        "configuration": [
+            {
+                "title": "Joaquin's Package Watch Configurations",
+                "properties": {
+                    "joaquinsPackageWatch.enable": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Controls whether Joaquin's Package Watch is enabled or not."
+                    },
+                    "joaquinsPackageWatch.maximumNumberOfNotification": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Maximum number of notifications to be displayed simultaneously. Use negative number to display all notifications."
+                    }
+                }
             }
         ]
     },
@@ -51,7 +74,9 @@
         "preversion": "git push --dry-run origin master:master",
         "postinstall": "node ./node_modules/vscode/bin/install",
         "postversion": "git push --tags --quiet origin master:master",
+        "pretest": "yarn lint",
         "test": "yarn compile && node ./node_modules/vscode/bin/test",
+        "lint": "tslint src/**/*.ts",
         "version": "vsce publish",
         "watch": "tsc -watch -p ./"
     },
@@ -62,13 +87,9 @@
         "lodash": "4.17.11",
         "request": "^2.88.0",
         "semver": "^5.5.0",
-        "typescript": "^3.0.3",
         "vscode": "1.1.21",
         "vscode-chrome-debug-core": "6.7.19",
-        "vscode-debugadapter": "1.32.1",
-        "vscode-extension-telemetry": "^0.0.21",
-        "vscode-languageclient": "^5.1.0",
-        "vscode-nls": "4.0.0"
+        "vscode-debugadapter": "1.32.1"
     },
     "devDependencies": {
         "@types/babel-types": "^7.0.4",
@@ -88,11 +109,10 @@
         "mocha": "^5.2.0",
         "ts-mocha": "^2.0.0",
         "ts-node": "^7.0.1",
-        "tslint": "^5.11.0",
+        "tslint": "5.11.0",
+        "typescript": "3.0.3",
         "vscode-chrome-debug-core-testsupport": "4.0.0",
         "vscode-debugadapter-testsupport": "1.32.0",
-        "vscode-debugprotocol": "1.32.0",
-        "vscode-nls-dev": "^3.2.2",
-        "vscode-xterm": "3.8.0-beta5"
+        "vscode-debugprotocol": "1.32.0"
     }
 }

@@ -1,6 +1,6 @@
 {
 	"files.exclude": {
-	"dist": false // set this to true to hide the "out" folder with the compiled JS files
+		"dist": false
 	},
 	"search.exclude": {
 		"dist": true
@@ -18,17 +18,16 @@
 	"tslint.enable": true,
 	"tslint.jsEnable": true,
 	"typescript.tsc.autoDetect": "off",
+	"typescript.tsdk": "./node_modules/typescript/lib",
 	"mocha.files.glob": "src/test/*",
 	"mocha.requires": [
 		"babel-register",
 		"ts-node/register"
 	],
-	"mocha.node_options": [
-		"--require",
-		"src/test/index.ts"
-	],
 	"mocha.options": {
 		"--opts",
-		"src/test/mocha.opts"
+		"src/test/mocha.opts",
+		"--require",
+		"src/test/index.ts"
 	}
 }
