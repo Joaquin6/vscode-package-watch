@@ -5,13 +5,22 @@ import { sync } from 'glob';
 import { parse as yarnParse } from '@yarnpkg/lockfile';
 import { satisfies, valid, validRange } from 'semver';
 import { existsSync, readFileSync, removeSync } from 'fs-extra';
-import { chain, compact, debounce, get, includes, isEmpty, isEqual, findLast, fromPairs, mapValues, some, toPairs, uniq } from 'lodash';
+import { chain, compact, debounce, difference, get, has, includes, isEmpty, isEqual, find, findLast, fromPairs, mapValues, some, toPairs, uniq } from 'lodash';
 import { window, workspace, commands, CancellationToken, CancellationTokenSource, ExtensionContext, FileSystemWatcher, OutputChannel, ProgressLocation } from 'vscode';
 
-import * as config from './helpers/config';
+import { defaultConfiguration, getConfiguration } from './helpers/config';
 import * as logger from './helpers/logger';
 
 logger.logInfo('Extension module is loaded');
+
+type Report = {
+    packageJsonPath: string,
+    problems: Array<{
+        toString: () => string,
+        moduleCheckingNeeded?: boolean,
+        modulePathForCleaningUp?: string,
+    }>
+};
 
 const queue: Array<string> = [];
 const lastCheckedDependencies = new Map();
@@ -25,19 +34,48 @@ class InstallationOperation extends CancellationTokenSource {}
 let outputChannel: OutputChannel;
 let fileWatcher: FileSystemWatcher;
 let pendingOperation: CancellationTokenSource;
-
-type Report = {
-    packageJsonPath: string,
-    problems: Array<{
-        toString: () => string,
-        moduleCheckingNeeded?: boolean,
-        modulePathForCleaningUp?: string,
-    }>
-};
+let configuration = defaultConfiguration();
 
 const getPackageJsonPathList = async () =>
     (await workspace.findFiles('**/package.json', '**/node_modules/**'))
     .map(({ fsPath }) => fsPath);
+
+function getHashDifference(oldHash, newHash) {
+    const diffs = [];
+
+    for (const key in oldHash) {
+        if (oldHash.hasOwnProperty(key)
+            && newHash.hasOwnProperty(key)
+            && oldHash[key] === newHash[key]) {
+                continue;
+        }
+
+        if (oldHash.hasOwnProperty(key) && !newHash.hasOwnProperty(key)) {
+            diffs.push([key, oldHash[key]]);
+            continue;
+        }
+
+        if (oldHash.hasOwnProperty(key)
+            && newHash.hasOwnProperty(key)
+            && oldHash[key] !== newHash[key]) {
+                diffs.push([key, newHash[key]]);
+        }
+    }
+
+    for (const key in newHash) {
+        if (newHash.hasOwnProperty(key)
+            && oldHash.hasOwnProperty(key)
+            && newHash[key] === oldHash[key]) {
+                continue;
+        }
+
+        if (newHash.hasOwnProperty(key) && !oldHash.hasOwnProperty(key)) {
+            diffs.push([key, newHash[key]]);
+        }
+    }
+
+    return diffs;
+}
 
 const createReports = (
     packageJsonPathList: Array<string>,
@@ -56,15 +94,64 @@ const createReports = (
             .value();
 
         // Skip this file as there is no dependencies written in the file
-        if (isEmpty(expectedDependencies)) { return; }
+        if (isEmpty(expectedDependencies)) {
+            logger.logInfo('Creating Reports - No expected packages found.');
+            return;
+        }
 
         const packageJsonHash = fromPairs(expectedDependencies);
+        const lastPackageJsonHash = lastCheckedDependencies.has(packageJsonPath)
+            ? lastCheckedDependencies.get(packageJsonPath)
+            : false;
+        const equalHashes = lastPackageJsonHash
+            ? isEqual(lastPackageJsonHash, packageJsonHash)
+            : false;
 
-        if (
-            skipUnchanged &&
-            lastCheckedDependencies.has(packageJsonPath) &&
-            isEqual(lastCheckedDependencies.get(packageJsonPath), packageJsonHash)
-        ) { return; }
+        if (skipUnchanged && equalHashes) {
+            logger.logInfo('Creating Reports - The package json hash did not change.');
+            return;
+        }
+
+        let packageJsonHashDiff;
+        if (lastPackageJsonHash && !equalHashes) {
+            const hashDiff = getHashDifference(lastPackageJsonHash, packageJsonHash);
+
+            if (!isEmpty(hashDiff)) {
+                logger.logInfo(`Hash Difference => ${JSON.stringify(hashDiff, null, 2)}`);
+
+                packageJsonHashDiff = hashDiff.map(pkghash => {
+                    const depName: string = pkghash[0];
+                    const msgStart = `Dependency "${depName}"`;
+
+                    let action: string;
+                    let msgBody: string;
+
+                    if (has(lastPackageJsonHash, depName) && has(packageJsonHash, depName)) {
+                        const newVersion = packageJsonHash[depName];
+                        const oldVersion = lastPackageJsonHash[depName];
+                        action = 'version change';
+                        msgBody = `version was changed from "${oldVersion}" to "${newVersion}"`;
+                    } else if (!has(lastPackageJsonHash, depName) && has(packageJsonHash, depName)) {
+                        action = 'added';
+                        msgBody = `is being added`;
+                    } else if (has(lastPackageJsonHash, depName) && !has(packageJsonHash, depName)) {
+                        action = 'removed';
+                        msgBody = `is being removed`;
+                    }
+
+                    const message = `${msgStart} ${msgBody}.`;
+
+                    logger.logInfo(message);
+
+                    return {
+                        action,
+                        message,
+                        name: depName,
+                    };
+                });
+            }
+
+        }
 
         lastCheckedDependencies.set(packageJsonPath, packageJsonHash);
 
@@ -82,7 +169,7 @@ const createReports = (
             };
         }
 
-        return {
+        const report = {
             packageJsonPath,
             problems: compact(dependencies.map(({
                 name,
@@ -98,6 +185,16 @@ const createReports = (
                         msg = `"${name}" was not installed.`;
                     }
 
+                    return { toString: () => msg };
+                }
+
+                const foundInHashDiff = !isEmpty(packageJsonHashDiff)
+                    ? find(packageJsonHashDiff, dep => dep.name === name)
+                    : undefined;
+
+                if (foundInHashDiff && foundInHashDiff.action === 'removed') {
+                    msg = `"${name}@${lockedVersion}" was found in the lock file`;
+                    msg += ` but it needs to be removed.`;
                     return { toString: () => msg };
                 }
 
@@ -127,12 +224,19 @@ const createReports = (
                 }
             }))
         };
+
+        return report;
     })
     .filter(report => report && report.problems.length > 0);
 
 async function installDependencies(reports: Array<Report> = [], secondTry = false) {
-    if (pendingOperation instanceof InstallationOperation) { return; }
-    if (pendingOperation instanceof CheckingOperation) { pendingOperation.cancel(); }
+    if (pendingOperation instanceof InstallationOperation) {
+        logger.logInfo('Installation Operation already in progress');
+        return;
+    }
+    if (pendingOperation instanceof CheckingOperation) {
+        pendingOperation.cancel();
+    }
 
     logger.logInfo('Installing Dependencies');
 
@@ -298,11 +402,15 @@ async function installDependencies(reports: Array<Report> = [], secondTry = fals
             action: () => { outputChannel.show(); },
         };
 
+        logger.logError(outdatedMsg);
+
         return window.showWarningMessage(outdatedMsg, reInstallDeps, showProblems)
             .then(selectOption => selectOption && selectOption.action());
     }
 
-    return window.showInformationMessage('Successfully installed node dependencies.');
+    const successMsg: string = 'Successfully installed node dependencies.';
+    logger.logInfo(successMsg);
+    return window.showInformationMessage(successMsg);
 }
 
 async function checkDependencies(
@@ -314,29 +422,53 @@ async function checkDependencies(
 
     const reports = createReports(packageJsonPathList, skipUnchanged, token);
 
-    if (token.isCancellationRequested) { return; }
-    if (isEmpty(reports)) { return true; }
+    if (token.isCancellationRequested) {
+        logger.logInfo('Cancelling Dependency Check - Token Cancellation was Requested');
+        return;
+    }
+    if (isEmpty(reports)) {
+        logger.logInfo('Dependency Check - No Problems Reported');
+        return true;
+    }
 
     printReports(reports, token);
 
-    if (token.isCancellationRequested) { return; }
+    if (token.isCancellationRequested) {
+        logger.logInfo('Cancelling Dependency Check - Token Cancellation was Requested');
+        return;
+    }
 
-    /**
-     * @todo Think about perhaps running `installDependencies(reports)` immidiately instaed of
-     * asking via a warning message. This can be enabled maybe thru a settings option.
-     */
-    const outdatedMsg = 'Detected outdated node dependencies.';
-    const installDeps = {
-        title: 'Install Dependencies',
-        action: () => { installDependencies(reports); },
-    };
-    const showProblems = {
-        title: 'Show Problems',
-        action: () => { outputChannel.show(); },
-    };
+    if (!configuration) {
+        configuration = await getConfiguration();
+    }
 
-    return window.showWarningMessage(outdatedMsg, installDeps, showProblems)
-        .then(selectOption => { if (selectOption) { selectOption.action(); } });
+    /** Only prompt if option is set to true */
+    if (configuration.promptForUpdate) {
+        const outdatedMsg = 'Detected outdated node dependencies.';
+        const installDeps = {
+            title: 'Install Dependencies',
+            action: () => { installDependencies(reports); },
+        };
+        const showProblems = {
+            title: 'Show Problems',
+            action: () => { outputChannel.show(); },
+        };
+
+        logger.logInfo(`Dependency Update Prompt - ${outdatedMsg}`);
+
+        return window.showWarningMessage(outdatedMsg, installDeps, showProblems)
+            .then(selectOption => {
+                if (selectOption) {
+                    logger.logInfo(`Dependency Update Prompt - Selected ${selectOption.title}`);
+                    selectOption.action();
+                } else {
+                    logger.logInfo('Dependency Update Prompt - No Option was Selected');
+                }
+            });
+    }
+
+    /** Otherwise just run the dependency installation script */
+    return installDependencies(reports);
 }
 
 function printReports(reports: Array<Report>, token: CancellationToken) {
@@ -469,8 +601,6 @@ export async function activate(context: ExtensionContext) {
     outputChannel = window.createOutputChannel('Joaquin\'s Package Watcher');
     logger.logInfo('Activating Joaquins Package Watch');
 
-    let configuration;
-
     const defer = debounce(async () => {
         logger.logInfo('Running Defer');
 
@@ -513,7 +643,7 @@ export async function activate(context: ExtensionContext) {
         }
         if (typeof path === 'string') {
             if (!configuration) {
-                configuration = await config.getConfiguration(path);
+                configuration = await getConfiguration(path);
             }
             if (!includes(queue, path)) {
                 queue.push(path);

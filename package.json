@@ -58,6 +58,16 @@
                         "default": true,
                         "description": "Controls whether Joaquin's Package Watch is enabled or not."
                     },
+                    "joaquinsPackageWatch.configFileName": {
+                        "type": "string",
+                        "default": ".jpwrc",
+                        "description": "Config RC file alternative to find at the root of your workspace."
+                    },
+                    "joaquinsPackageWatch.promptForUpdate": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Controls whether you should be prompted to update when outdated packages are detected."
+                    },
                     "joaquinsPackageWatch.maximumNumberOfNotification": {
                         "type": "integer",
                         "default": 10,
