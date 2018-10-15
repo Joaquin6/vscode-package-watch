@@ -36,8 +36,8 @@ let fileWatcher: FileSystemWatcher;
 let pendingOperation: CancellationTokenSource;
 let configuration = defaultConfiguration();
 
-const getPackageJsonPathList = async () =>
-    (await workspace.findFiles('**/package.json', '**/node_modules/**'))
+const getPackageJsonPathList = async ({ include, exclude }) =>
+    (await workspace.findFiles(include, exclude))
     .map(({ fsPath }) => fsPath);
 
 function getHashDifference(oldHash, newHash) {
@@ -253,8 +253,12 @@ async function installDependencies(reports: Array<Report> = [], secondTry = fals
         return;
     }
 
+    if (!configuration) {
+        configuration = await getConfiguration();
+    }
+
     const packageJsonPathList = reports.length === 0
-        ? await getPackageJsonPathList()
+        ? await getPackageJsonPathList(configuration)
         : reports.map(({ packageJsonPath }) => packageJsonPath);
 
     if (token.isCancellationRequested) { return; }
@@ -601,6 +605,8 @@ export async function activate(context: ExtensionContext) {
     outputChannel = window.createOutputChannel('Joaquin\'s Package Watcher');
     logger.logInfo('Activating Joaquins Package Watch');
 
+    configuration = await getConfiguration();
+
     const defer = debounce(async () => {
         logger.logInfo('Running Defer');
 
@@ -669,7 +675,7 @@ export async function activate(context: ExtensionContext) {
         if (basename(fsPath) === 'package-lock.json') {
             return batch(join(dirname(fsPath), 'package.json'));
         }
-        batch(await getPackageJsonPathList());
+        batch(await getPackageJsonPathList(configuration));
     }));
 
     context.subscriptions.push(commands.registerCommand(cmdCheck, async () => {
@@ -678,7 +684,7 @@ export async function activate(context: ExtensionContext) {
         pendingOperation = new CheckingOperation();
         const { token } = pendingOperation;
         outputChannel.clear();
-        const success = await checkDependencies(await getPackageJsonPathList(), false, token);
+        const success = await checkDependencies(await getPackageJsonPathList(configuration), false, token);
 
         if (success) { window.showInformationMessage('The node dependencies are in-sync.'); }
         if (token === pendingOperation.token) { pendingOperation = null; }
@@ -686,7 +692,7 @@ export async function activate(context: ExtensionContext) {
 
     context.subscriptions.push(commands.registerCommand(cmdInstall, installDependencies));
 
-    batch(await getPackageJsonPathList());
+    batch(await getPackageJsonPathList(configuration));
 
     logger.logInfo('Successfully Activated Joaquins Package Watch');
 }

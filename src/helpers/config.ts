@@ -6,6 +6,8 @@ import * as logger from './logger';
 
 type Config = {
     enable: boolean,
+    exclude: string,
+    include: string,
     configFileName: string,
     promptForUpdate: boolean,
     maximumNumberOfNotification: number,
@@ -21,6 +23,8 @@ function logConfigObject(c: Config = configuration) {
 
 export const defaultConfiguration = (): Config => ({
     enable: true,
+    exclude: '**/node_modules/**',
+    include: '**/package.json',
     promptForUpdate: false,
     maximumNumberOfNotification: 10,
     configFileName: DEFAULT_CONFIG_FILE_NAME,
