@@ -99,10 +99,10 @@
         "@yarnpkg/lockfile": "^1.1.0",
         "fs-extra": "^6.0.1",
         "glob": "^7.1.2",
-        "lodash": "4.17.11",
+        "lodash": "^4.17.15",
         "request": "^2.88.0",
         "semver": "^5.5.0",
-        "vscode": "1.1.21",
+        "vscode": "^1.1.36",
         "vscode-chrome-debug-core": "6.7.19",
         "vscode-debugadapter": "1.32.1"
     },
